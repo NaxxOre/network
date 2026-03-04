@@ -1,0 +1,224 @@
+Step-by-step (Windows, Docker)
+
+Open PowerShell in WAC.
+Start services: docker compose up --build -d
+Check containers: docker compose ps
+Open app:
+Login/signup page: http://localhost/
+Direct login page: http://localhost/login
+Dashboards (HTTP): http://localhost/dashboards/
+Direct dashboards (HTTP): http://localhost:5601/dashboards/
+Guard API docs: http://localhost:8000/docs
+Resource API docs: http://localhost:8001/docs
+Note: HTTPS is not configured by default, so use http:// not https://
+If opening from phone/another laptop
+
+Run PowerShell as Admin once: New-NetFirewallRule -DisplayName "WAC HTTP 80" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 80 -Profile Private
+Find your LAN IP: Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null } | Select-Object -ExpandProperty IPv4Address
+Open http://<LAN_IP>/ on the other device (same Wi-Fi).
+Direct login on other device: http://<LAN_IP>/login
+Useful commands
+
+Stop: docker compose down
+Rebuild after code changes: docker compose up --build -d
+Optional full demo/seed script: demo.ps1 from WAC/demo.ps1
+If you want, I can run a quick health check now and verify each endpoint with your current setup.
+
+Fast host-mode run (real LAN IP in app logs)
+
+One-time setup:
+- Copy-Item WAC\webauthguard\.env.host.example WAC\webauthguard\.env.host
+- Edit WAC\webauthguard\.env.host (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+
+Run each time:
+- cd WAC
+- .\scripts\run-host-guard.ps1
+
+Optional:
+- First-time clean bootstrap: .\scripts\run-host-guard.ps1 -Bootstrap
+- Auto open firewall 8000 (run PowerShell as Admin): .\scripts\run-host-guard.ps1 -OpenFirewall
+- Skip docker start/stop if already running: .\scripts\run-host-guard.ps1 -SkipDocker
+
+Topology showcase (for school demo)
+
+Goal: show end-to-end monitoring from network traffic to app-level threat detection.
+
+1) Simple topology
+- Node A: victim host running Docker stack (WAC + OpenSearch + dashboards)
+- Node B: normal user client
+- Node C: attacker client (failed logins / brute force / many sessions)
+- Optional router/firewall node between clients and Node A
+
+2) Demo flow
+- Normal login from Node B -> success event in dashboards + Telegram
+- Failed repeated login from Node C -> brute-force signal
+- Login using multiple browsers/devices with same account -> parallel session violation
+- Add X-Country header changes in API calls -> geography anomaly
+
+3) Minimum evidence to present
+- Screenshot: topology map
+- Screenshot: dashboards panels changing in real time
+- Screenshot: Telegram alerts with request_id, source_ip, session_id, device
+- Correlation table: time, source IP, account, threat_type, action
+
+Important note about client IP on Windows Docker Desktop
+
+- Seeing source_ip=172.19.0.1 can be normal on Docker Desktop because of NAT between host and Linux VM.
+- If you need true per-device LAN IP in logs for a graded demo, run WAC in a Linux VM/host (or in GNS3) with bridged networking.
+
+Threat-pattern demo commands (quick)
+
+1) Account brute force (same account, many failed attempts)
+- CMD:
+for /L %i in (1,1,7) do curl -s -o nul -w "code=%{http_code}\n" -X POST http://localhost:8000/login -d "username=test&password=Wrong123!"
+- PowerShell:
+1..7 | ForEach-Object { curl.exe -s -o NUL -w "code=%{http_code}`n" -X POST http://localhost:8000/login -d "username=test&password=Wrong123!" }
+
+2) Credential stuffing (one source tries many usernames)
+- CMD:
+for %u in (alice bob carol dave erin frank) do curl -s -o nul -w "%u code=%{http_code}\n" -X POST http://localhost:8000/login -d "username=%u&password=Wrong123!"
+- PowerShell:
+"alice","bob","carol","dave","erin","frank" | ForEach-Object { curl.exe -s -o NUL -w "$_ code=%{http_code}`n" -X POST http://localhost:8000/login -d "username=$_&password=Wrong123!" }
+
+3) Distributed account attack (same account from many sessions)
+- CMD:
+for /L %i in (1,1,4) do curl -s -o nul -w "sess-%i code=%{http_code}\n" -X POST http://localhost:8000/login -H "X-Session-ID: attacker-%i" -d "username=test&password=Wrong123!"
+- PowerShell:
+1..4 | ForEach-Object { curl.exe -s -o NUL -w "sess-$_ code=%{http_code}`n" -X POST http://localhost:8000/login -H "X-Session-ID: attacker-$_" -d "username=test&password=Wrong123!" }
+
+Geo/VPN quick test
+
+1) Trigger geo anomaly for same user (US then DE):
+curl -i -H "X-WebID: https://alice.example/profile#me" -H "X-Country: US" -H "X-Session-ID: geo-1" http://localhost:8000/r/docs/report.txt
+curl -i -H "X-WebID: https://alice.example/profile#me" -H "X-Country: DE" -H "X-Session-ID: geo-2" http://localhost:8000/r/docs/report.txt
+
+2) Force VPN flag for demo:
+curl -i -H "X-WebID: https://alice.example/profile#me" -H "X-Country: US" -H "X-VPN-Suspected: true" -H "X-Session-ID: vpn-1" http://localhost:8000/r/docs/report.txt
+
+Expected threat types:
+- vpn_geography_anomaly
+- vpn_proxy_network
+
+Log monitoring panel (OpenSearch Dashboards)
+
+1) Open: http://localhost/dashboards/
+2) Go to Discover -> choose data view: webauthguard-events-*
+3) Filter:
+- security.event_type : "auth_login"
+4) Add columns:
+- @timestamp
+- src_ip
+- agent.username
+- security.login_result
+- security.threat_types
+- security.threat_level
+- security.country_code
+- security.vpn_suspected
+- security.session_id
+5) Save search as: "WAC Auth Log Monitor"
+6) In Dashboard "WebAuthGuard Security Overview" -> Edit -> Add from library -> pick "WAC Auth Log Monitor"
+
+One-day SOC showcase flow (recommended)
+
+Fast Demo Start
+
+1) Start core stack:
+- cd WAC
+- docker compose up -d opensearch resource dashboards nginx
+- docker compose stop guard
+
+2) Start host guard (real LAN source IP + Telegram from host runtime):
+- .\scripts\run-host-guard.ps1 -ForceFreePort
+
+If you see port error [Errno 10048] on :8000:
+- Get-NetTCPConnection -LocalPort 8000 -State Listen | Select-Object OwningProcess
+- Stop-Process -Id <PID> -Force
+- Re-run: .\scripts\run-host-guard.ps1 -ForceFreePort
+
+If you see 502 Bad Gateway on http://localhost/dashboards/:
+- docker compose up -d opensearch dashboards nginx
+- wait 15-30 seconds, then open http://localhost/dashboards/
+
+3) Upgrade dashboard export with showcase panels:
+- powershell -ExecutionPolicy Bypass -File .\scripts\upgrade_showcase_ndjson.ps1
+- Import NDJSON in Dashboards (Saved Objects -> Import): WAC\opensearch\webauthguard-security-dashboard.ndjson
+- (Optional if dashboard already imported): powershell -ExecutionPolicy Bypass -File .\scripts\update_showcase_dashboard.ps1
+
+Run Attack Storyboard
+
+1) Execute all 6 scenarios in one command:
+- powershell -ExecutionPolicy Bypass -File .\scripts\run-attack-storyboard.ps1
+
+2) Optional params:
+- -BaseUrl http://localhost:8000
+- -RunId run-20260303-1
+- -TargetUser admin
+- -WrongPassword Wrong123!
+
+Run one-by-one scenarios (for class showcase)
+
+1) Baseline success only:
+- powershell -ExecutionPolicy Bypass -File .\scripts\baseline-success.ps1
+
+2) Brute force only:
+- powershell -ExecutionPolicy Bypass -File .\scripts\brute-force.ps1
+
+3) Credential stuffing only:
+- powershell -ExecutionPolicy Bypass -File .\scripts\credential-stuffing.ps1
+
+4) Distributed account attack only:
+- powershell -ExecutionPolicy Bypass -File .\scripts\distributed-account-attack.ps1
+
+5) Parallel session violation only:
+- powershell -ExecutionPolicy Bypass -File .\scripts\parallel-session-violation.ps1
+
+6) VPN/Geo anomaly only:
+- powershell -ExecutionPolicy Bypass -File .\scripts\vpn-geo-anomaly.ps1
+
+Open Dashboard With Run-ID Filter
+
+1) Open: http://localhost/dashboards/
+2) Dashboard: "WebAuthGuard Security Overview"
+3) Add filter:
+- demo.run_id : "<RUN_ID_FROM_SCRIPT>"
+4) Useful extra filters:
+- demo.scenario : "credential_stuffing"
+- src_ip : "192.168.1.54"
+- agent.username : "admin"
+
+Show Telegram Evidence
+
+Check bot chat for:
+- scenario=<scenario_name>
+- run_id=<run_id>
+- source_ip=<ip>
+- username=<username>
+- threat_types=<types>
+- threat_level=<level>
+
+Call Incident Summary Endpoint
+
+1) Last 15 minutes:
+- curl.exe "http://localhost:8000/incidents/summary?minutes=15"
+
+2) Filter by one demo run:
+- curl.exe "http://localhost:8000/incidents/summary?minutes=60&run_id=<RUN_ID>"
+
+Expected response fields:
+- window_minutes
+- total_events
+- threat_events
+- top_source_ips
+- top_accounts
+- top_threat_types
+- max_threat_score
+- severity
+- summary_text
+- recommended_actions
+
+Screenshot checklist (for teacher)
+
+1) Topology diagram (Host + Phone + Attacker client)
+2) Live dashboard with run_id filter during storyboard run
+3) Telegram alert showing scenario + run_id + threat_types
+4) /incidents/summary output (JSON) for same run_id
