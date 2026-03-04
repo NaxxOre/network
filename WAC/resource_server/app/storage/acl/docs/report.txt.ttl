@@ -1,0 +1,14 @@
+@prefix acl: <http://www.w3.org/ns/auth/acl#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+
+<#read-public>
+  a acl:Authorization ;
+  acl:accessTo <http://resource:8001/r/docs/report.txt> ;
+  acl:mode acl:Read ;
+  acl:agentClass foaf:Agent .
+
+<#write-alice>
+  a acl:Authorization ;
+  acl:accessTo <http://resource:8001/r/docs/report.txt> ;
+  acl:mode acl:Write ;
+  acl:agent <https://alice.example/profile#me> .
